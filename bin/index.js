@@ -1,14 +1,53 @@
 #! /usr/bin/env node
+const os = require("os");
+const fs = require("fs");
 const yargs = require('yargs');
 const axios = require('axios');
 const HTMLParser = require('node-html-parser');
+const timeAgo = require('node-time-ago');
 const options = yargs
   .usage('Usage: -n <number> -p <password>')
   .option('n', { alias: 'phone', describe: 'Phone number, format 33000000000', type: 'string', demandOption: true })
   .option('p', { alias: 'password', describe: 'Password', type: 'string', demandOption: true })
+  .option('t', { alias: 'trackInternet', describe: 'Track internet traffic consumption between checks and show delta', type: 'boolean', demandOption: false })
   .option('d', { alias: 'domain', describe: 'Domain, www.lycamobile.fr by default', default: 'www.lycamobile.fr', type: 'string' })
   .option('r', { alias: 'maxRetries', describe: 'Max number of retries to retrieve data', default: 10, type: 'number' })
   .argv;
+
+const tempDir = os.tmpdir();
+const tempFilePath = `${tempDir}/lycamobile-${options.phone}.json`;
+
+const writeTempFile = (path, data) => {
+  try {
+    fs.writeFileSync(path, JSON.stringify(data), { flag: 'w' });
+    return true;
+  } catch (err) { return false; }
+}
+
+const readTempFile = (path) => {
+  try {
+    const data = fs.readFileSync(path);
+    return JSON.parse(data.toString());
+  } catch (err) { return false; }
+}
+
+const trackInternetUsage = (path, data) => {
+  const oldData = readTempFile(path);
+  const newValue = parseFloat(data['internet'], 10);
+  const oldValue = parseFloat(oldData['internet'], 10);
+  if (!isNaN(newValue) && !isNaN(oldValue) && newValue > 0) {
+    const delta = (oldValue - newValue).toFixed(2) * 1;
+    if (delta > 0) {
+      data['internet'] += ` \x1b[31m-${delta}GB\x1b[0m`;
+    } else {
+      data['internet'] += ` \x1b[2mno changes\x1b[0m`;
+    }
+    data['internet'] += ` \x1b[2m${timeAgo(oldData.checked)}\x1b[0m`;
+  }
+  writeTempFile(path, data);
+  delete data['checked'];
+  return data;
+}
 
 const printOutput = (data) => {
   let output = '';
@@ -98,14 +137,14 @@ const parseAccountHTML = (html) => {
     const internet = [...root.querySelectorAll('div.bdl-mins')
       .map((el) => {
       const element = el.text.replaceAll('\n', '');
-      if (element !== 'U' && element !== 'Unlimited') return element;
+      if (element !== 'U' && element !== 'Unlimited' && element != 0) return element;
     })].filter(el => el !== undefined);
     
     return {
       phone,
       balance,
-      internet: internet.join(', '),
-      expiration: expiration.join(', '),
+      internet: internet.join(', ') || 'unknown',
+      expiration: expiration.join(', ') || 'unknown',
     };
   } catch (err) {
     return exitWithError(`Parsing error: ${err}` || 'unknown');
@@ -124,6 +163,14 @@ const parseAccountHTML = (html) => {
   if (retries === options.maxRetries) {
     return exitWithError(`Max number of tries exhausted with error: ${err}` || 'unknown');
   }
-  const data = parseAccountHTML(html);
+  
+  let data = parseAccountHTML(html);
+  
+  if (options.trackInternet) {
+    data = trackInternetUsage(tempFilePath, { ...data, checked: new Date() });
+  } else {
+    try { fs.unlinkSync(tempFilePath); } catch {}
+  }
+  
   printOutput(data);
 })()
